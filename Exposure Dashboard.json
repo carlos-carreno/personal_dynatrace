@@ -1,0 +1,3042 @@
+{
+"version": 18,
+"variables": [
+{
+"key": "ResolutionStatus",
+"type": "csv",
+"input": "OPEN,RESOLVED",
+"multiple": true,
+"defaultValue": [
+"OPEN",
+"RESOLVED"
+],
+"visible": true,
+"version": 1
+},
+{
+"key": "RiskLevel",
+"type": "csv",
+"input": "CRITICAL,HIGH,MEDIUM,LOW,NONE",
+"multiple": true,
+"defaultValue": [
+"CRITICAL",
+"HIGH",
+"MEDIUM",
+"LOW",
+"NONE"
+],
+"visible": true,
+"version": 1
+},
+{
+"key": "ManagementZone",
+"type": "query",
+"input": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// filter for the latest snapshot per entity\n| dedup {vulnerability.display_id, affected_entity.id}, sort:{timestamp desc}\n| expand management_zones=affected_entity.management_zones.names\n| filterOut isNull(management_zones)\n| summarize count(), by: {values=management_zones}\n| sort values, direction:\"ascending\"\n| summarize values=arrayRemoveNulls(collectDistinct(values))\n| fields values = array(\"All\", values)",
+"multiple": true,
+"defaultValue": [
+"All"
+],
+"visible": true,
+"version": 1
+},
+{
+"key": "StackLevel",
+"type": "query",
+"input": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// filter for the latest snapshot per entity\n| dedup {vulnerability.display_id, affected_entity.id}, sort:{timestamp desc}\n| filterOut isNull(vulnerability.stack)\n| summarize count(), by: {values=vulnerability.stack}\n| sort values, direction:\"ascending\"\n| summarize values=arrayRemoveNulls(collectDistinct(values))\n| fields values = array(\"All\", values)",
+"multiple": true,
+"defaultValue": [
+"All"
+],
+"visible": true,
+"version": 1
+},
+{
+"key": "Type",
+"type": "query",
+"input": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// filter for the latest snapshot per entity\n| dedup {vulnerability.display_id, affected_entity.id}, sort:{timestamp desc}\n| summarize count(), by: {values=vulnerability.type}\n| sort values, direction:\"ascending\"\n| summarize values=arrayRemoveNulls(collectDistinct(values))\n| fields values = array(\"All\", values)",
+"multiple": true,
+"defaultValue": [
+"All"
+],
+"visible": true,
+"version": 1
+},
+{
+"key": "MuteStatus",
+"type": "csv",
+"input": "MUTED,NOT_MUTED",
+"multiple": true,
+"defaultValue": [
+"MUTED",
+"NOT_MUTED"
+],
+"visible": true,
+"version": 1
+},
+{
+"key": "ComponentName",
+"type": "csv",
+"input": "All,log4j,apache,spring",
+"multiple": false,
+"defaultValue": "All",
+"visible": true,
+"version": 1
+}
+],
+"tiles": {
+"195": {
+"type": "data",
+"title": "Vulnerabilities by risk",
+"query": "fetch events, from:toTimestamp($dt_timeframe_to)-30m, to:toTimestamp($dt_timeframe_to)\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// filter for the latest snapshot per entity\n| dedup {vulnerability.display_id, affected_entity.id}, sort:{timestamp desc}\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| summarize{\n  Critical=countIf(vulnerability.risk.level==\"CRITICAL\"),\n  High=countIf(vulnerability.risk.level==\"HIGH\"),\n  Medium=countIf(vulnerability.risk.level==\"MEDIUM\"),\n  Low=countIf(vulnerability.risk.level==\"LOW\"),\n  None=countIf(vulnerability.risk.level==\"NONE\"),\n  maxScore=takeMax(vulnerability.risk.score)\n}, by: {vulnerability.display_id}\n| fieldsAdd riskLevel=if(Critical>0,\"CRITICAL\", else:\n                         if(High>0,\"HIGH\", else:\n                         if(Medium>0,\"MEDIUM\", else:\n                         if(Low>0,\"LOW\", else:\n                         if(None>0,\"NONE\")))))\n| summarize {\nVulnerabilities=count(),\nmaxScore=takeMax(maxScore)\n}, by:{`Risk level`=riskLevel}\n| sort maxScore, direction:\"descending\"",
+"davis": {
+"enabled": false
+},
+"visualization": "categoricalBarChart",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"gapPolicy": "connect",
+"circleChartSettings": {
+"groupingThresholdType": "absolute",
+"groupingThresholdValue": 0,
+"valueType": "absolute",
+"showTotalValue": true
+},
+"categoryOverrides": {
+"NONE": {
+"color": "var(--dt-colors-charts-categorical-color-05-default, #84859a)",
+"added": 1701791339383
+}
+},
+"categoricalBarChartSettings": {
+"categoryAxis": "Risk level",
+"categoryAxisLabel": "Risk level",
+"valueAxis": "Vulnerabilities",
+"valueAxisLabel": "Vulnerabilities",
+"categoryAxisTickLayout": "horizontal",
+"layout": "horizontal"
+},
+"colorPalette": "security-risk-level",
+"legend": {
+"position": "auto",
+"hidden": false
+},
+"truncationMode": "middle"
+},
+"singleValue": {
+"showLabel": true,
+"label": "riskLevel",
+"prefixIcon": "",
+"autoscale": true,
+"alignment": "center",
+"recordField": "riskLevel",
+"trend": {
+"trendType": "auto",
+"isVisible": true
+}
+},
+"table": {
+"rowDensity": "condensed",
+"enableSparklines": false,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnWidths": {},
+"columnTypeOverrides": []
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "Vulnerabilities"
+},
+"displayedFields": [
+"Risk level"
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "Vulnerabilities",
+"rangeAxis": ""
+},
+{
+"valueAxis": "maxScore",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": [
+"Risk level"
+]
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+}
+},
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+}
+},
+"196": {
+"type": "data",
+"title": "Open muted",
+"query": "fetch events, from:toTimestamp($dt_timeframe_to)-30m, to:toTimestamp($dt_timeframe_to)\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// filter for the latest snapshot per entity\n| dedup {vulnerability.display_id, affected_entity.id}, sort:{timestamp desc}\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| summarize {Muted=countIf(vulnerability.mute.status==\"MUTED\" AND vulnerability.resolution.status==\"OPEN\")}",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"Muted"
+],
+"categoryAxisLabel": "Muted",
+"valueAxis": [
+"Muted"
+],
+"valueAxisLabel": "Muted",
+"tooltipVariant": "single"
+},
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle"
+},
+"singleValue": {
+"showLabel": false,
+"label": "Muted",
+"autoscale": true,
+"prefixIcon": "NotificationOffIcon",
+"trend": {
+"isVisible": true,
+"isRelative": false,
+"isInverseTrend": true,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": false,
+"variant": "area",
+"color": {
+"Default": "var(--dt-colors-charts-categorical-color-05-default, #84859a)"
+},
+"record": "Vulnerabilities"
+},
+"recordField": "Muted",
+"alignment": "start"
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": []
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "Muted"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "Muted",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": []
+},
+"singleValueSettings": {
+"showLabel": true,
+"suffix": "",
+"autoscale": true
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"209": {
+"type": "markdown",
+"content": "\n### Threat exposure template\n---\nThis report template provides a high-level overview of your scoped environment's exposure to the selected vulnerabilities.  \nLearn more about this reporting use cases in [Security data analysis and reporting](https://docs.dynatrace.com/docs/platform-modules/application-security/use-cases/security-reporting)"
+},
+"215": {
+"type": "markdown",
+"content": "# <br>\n# <br>\n---"
+},
+"224": {
+"type": "data",
+"title": "Open vulnerabilities",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp,3h)}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| makeTimeseries {\n  Vulnerabilities=countIf(vulnerability.resolution.status==\"OPEN\" AND vulnerability.mute.status==\"NOT_MUTED\", default:0)\n}, time: timestamp, interval:3h\n| fieldsAdd `Open vulnerabilities`=arrayLast(Vulnerabilities)",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"Open vulnerabilities"
+],
+"categoryAxisLabel": "interval,Open vulnerabilities",
+"valueAxis": [
+"Open vulnerabilities"
+],
+"valueAxisLabel": "Open vulnerabilities",
+"tooltipVariant": "single"
+},
+"hiddenLegendFields": [],
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"Vulnerabilities"
+],
+"leftAxisDimensions": [
+"Open vulnerabilities"
+]
+},
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Open vulnerabilities",
+"autoscale": true,
+"prefixIcon": "ApplicationSecuritySignetIcon",
+"trend": {
+"isVisible": true,
+"isRelative": false,
+"isInverseTrend": true,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": true,
+"variant": "area",
+"color": {
+"Default": "var(--dt-colors-charts-categorical-themed-fireplace-color-01-default, #ae132d)"
+},
+"record": "Vulnerabilities",
+"showTicks": false
+},
+"recordField": "Open vulnerabilities",
+"alignment": "start"
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"Vulnerabilities"
+],
+"value": "sparkline",
+"id": 1734355516897
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Open vulnerabilities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": []
+},
+"singleValueSettings": {
+"showLabel": true,
+"suffix": "",
+"autoscale": true
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"225": {
+"type": "data",
+"title": "High",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp, 3h)}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| makeTimeseries {Vulnerabilities=countIf(vulnerability.risk.level == \"HIGH\", default:0)},\ntime: timestamp, interval:3h\n| fieldsAdd `High`=arrayLast(Vulnerabilities)",
+"visualizationSettings": {
+"thresholds": [
+{
+"id": 1,
+"field": "High",
+"title": "",
+"isEnabled": true,
+"rules": [
+{
+"id": 2,
+"color": {
+"Default": "var(--dt-colors-charts-loglevel-error-default, #ec7113)"
+},
+"comparator": ">",
+"label": "",
+"value": 0
+}
+]
+}
+],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"Vulnerabilities"
+],
+"leftAxisDimensions": [
+"High"
+]
+},
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"High"
+],
+"categoryAxisLabel": "interval,High",
+"valueAxis": [
+"High"
+],
+"valueAxisLabel": "High",
+"tooltipVariant": "single"
+},
+"hiddenLegendFields": [],
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "High",
+"autoscale": true,
+"prefixIcon": "SecurityHighIcon",
+"trend": {
+"isVisible": true,
+"isRelative": false,
+"isInverseTrend": true,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": false,
+"variant": "area",
+"color": {
+"Default": "var(--dt-colors-charts-categorical-color-05-default, #84859a)"
+},
+"record": "Vulnerabilities"
+},
+"recordField": "High",
+"alignment": "center",
+"colorThresholdTarget": "value"
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"Vulnerabilities"
+],
+"value": "sparkline",
+"id": 1734355516861
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "High",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": []
+},
+"singleValueSettings": {
+"showLabel": true,
+"suffix": "",
+"autoscale": true
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"226": {
+"type": "data",
+"title": "Critical",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp, 3h)}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| makeTimeseries {Vulnerabilities=countIf(vulnerability.risk.level == \"CRITICAL\", default:0)},\ntime: timestamp, interval:3h\n| fieldsAdd `Critical`=arrayLast(Vulnerabilities)",
+"visualizationSettings": {
+"thresholds": [
+{
+"id": 1,
+"field": "Critical",
+"title": "",
+"isEnabled": true,
+"rules": [
+{
+"id": 2,
+"color": {
+"Default": "var(--dt-colors-charts-security-risk-level-critical-default, #8a0012)"
+},
+"comparator": ">",
+"label": "",
+"value": 0
+}
+]
+}
+],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"Vulnerabilities"
+],
+"leftAxisDimensions": [
+"Critical"
+]
+},
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"Critical"
+],
+"categoryAxisLabel": "interval,Critical",
+"valueAxis": [
+"Critical"
+],
+"valueAxisLabel": "Critical",
+"tooltipVariant": "single"
+},
+"hiddenLegendFields": [],
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Critical",
+"autoscale": true,
+"prefixIcon": "SecurityCriticalIcon",
+"trend": {
+"isVisible": true,
+"isRelative": false,
+"isInverseTrend": true,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": false,
+"variant": "area",
+"color": {
+"Default": "var(--dt-colors-charts-categorical-themed-fireplace-color-01-default, #ae132d)"
+},
+"record": "Vulnerabilities",
+"showTicks": false
+},
+"recordField": "Critical",
+"alignment": "center",
+"colorThresholdTarget": "value"
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"Vulnerabilities"
+],
+"value": "sparkline",
+"id": 1734355516959
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Critical",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": []
+},
+"singleValueSettings": {
+"showLabel": true,
+"suffix": "",
+"autoscale": true
+},
+"unitsOverrides": []
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"227": {
+"type": "data",
+"title": "With resolved entities",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// filter for the latest snapshot per entity\n| dedup {vulnerability.display_id, affected_entity.id}, sort:{timestamp desc}\n// now summarize on the vulnerability level\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.resolution.change_date=takeMax(vulnerability.parent.resolution.change_date),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openEntities=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openEntities==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n//start metric calculation\n| summarize {\n  Resolved=countIf(vulnerability.resolution.status==\"RESOLVED\"  AND vulnerability.mute.status==\"NOT_MUTED\"\n                  AND vulnerability.parent.resolution.change_date>=toTimestamp($dt_timeframe_from)\n                  AND vulnerability.parent.resolution.change_date<=toTimestamp($dt_timeframe_to))\n}",
+"visualizationSettings": {
+"thresholds": [
+{
+"id": 1,
+"field": "Resolved",
+"title": "",
+"isEnabled": true,
+"rules": [
+{
+"id": 2,
+"color": {
+"Default": "var(--dt-colors-charts-categorical-color-09-default, #649438)"
+},
+"comparator": ">",
+"label": "",
+"value": 0
+}
+]
+}
+],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxisLabel": "Resolved",
+"valueAxisLabel": "Resolved",
+"categoryAxis": [
+"Resolved"
+],
+"valueAxis": [
+"Resolved"
+],
+"tooltipVariant": "single"
+},
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle"
+},
+"singleValue": {
+"showLabel": false,
+"label": "Resolved",
+"autoscale": true,
+"trend": {
+"isVisible": false,
+"isRelative": false,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": false,
+"variant": "area",
+"color": {
+"Default": "var(--dt-colors-charts-categorical-color-09-default, #649438)"
+},
+"record": "Vulnerabilities",
+"showTicks": false
+},
+"recordField": "Resolved",
+"alignment": "start",
+"colorThresholdTarget": "value"
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": []
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "Resolved"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "Resolved",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": []
+},
+"singleValueSettings": {
+"showLabel": true,
+"suffix": "",
+"autoscale": true
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"228": {
+"type": "data",
+"title": "With new affected entities",
+"query": "fetch events, from:toTimestamp($dt_timeframe_to)-30m, to:toTimestamp($dt_timeframe_to)\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.resolution.change_date=takeMax(vulnerability.parent.resolution.change_date),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| summarize {\n  Vulnerabilities=countIf(vulnerability.resolution.status==\"OPEN\" AND vulnerability.mute.status==\"NOT_MUTED\"\n                          AND vulnerability.parent.resolution.change_date>=toTimestamp($dt_timeframe_from)\n                          AND vulnerability.parent.resolution.change_date<=toTimestamp($dt_timeframe_to))\n}",
+"visualizationSettings": {
+"thresholds": [
+{
+"id": 1,
+"field": "Vulnerabilities",
+"title": "",
+"isEnabled": true,
+"rules": [
+{
+"id": 2,
+"color": {
+"Default": "var(--dt-colors-charts-loglevel-emergency-default, #9033a3)"
+},
+"comparator": ">",
+"label": "",
+"value": 0
+}
+]
+}
+],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxisLabel": "Vulnerabilities",
+"valueAxisLabel": "Vulnerabilities",
+"categoryAxis": [
+"Vulnerabilities"
+],
+"valueAxis": [
+"Vulnerabilities"
+],
+"tooltipVariant": "single"
+},
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle"
+},
+"singleValue": {
+"showLabel": false,
+"label": "Vulnerabilities",
+"autoscale": true,
+"trend": {
+"isVisible": false,
+"isRelative": false,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": true,
+"variant": "area",
+"color": {
+"Default": "var(--dt-colors-charts-security-risk-level-critical-default, #8a0012)"
+},
+"record": "Vulnerabilities",
+"showTicks": false
+},
+"recordField": "Vulnerabilities",
+"alignment": "start"
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": []
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "Vulnerabilities"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "Vulnerabilities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": []
+},
+"singleValueSettings": {
+"showLabel": true,
+"suffix": "",
+"autoscale": true
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"233": {
+"type": "data",
+"title": "Related Kubernetes workloads",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level per timestamp\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  related_entities=arrayRemoveNulls(collectDistinct(related_entities.kubernetes_workloads.ids, expand:true)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp,3h)}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| summarize {\n  related_entities=arraySize(collectDistinct(related_entities, expand:true))\n}, by: {timestamp}\n| makeTimeseries {\n  entities=sum(related_entities, default:0)\n}, time: timestamp, interval:3h\n| fieldsAdd Entities=arrayLast(entities)",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"Entities"
+],
+"categoryAxisLabel": "interval,Entities",
+"valueAxis": [
+"Entities"
+],
+"valueAxisLabel": "Entities",
+"tooltipVariant": "single"
+},
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"entities"
+],
+"leftAxisDimensions": [
+"Entities"
+]
+},
+"hiddenLegendFields": [],
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Entities",
+"autoscale": false,
+"alignment": "end",
+"recordField": "Entities",
+"trend": {
+"isRelative": false,
+"isVisible": true,
+"isInverseTrend": true,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": false,
+"record": "entities"
+}
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"entities"
+],
+"value": "sparkline",
+"id": 1734355517075
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Entities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": [],
+"firstVisibleRowIndex": 0
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"234": {
+"type": "data",
+"title": "Related services",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level per timestamp\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  related_entities=arrayRemoveNulls(collectDistinct(related_entities.services.ids, expand:true)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp,3h)}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| summarize {\n  related_entities=arraySize(collectDistinct(related_entities, expand:true))\n}, by: {timestamp}\n| makeTimeseries {\n  entities=sum(related_entities, default:0)\n}, time: timestamp, interval:3h\n| fieldsAdd Entities=arrayLast(entities)",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"Entities"
+],
+"categoryAxisLabel": "interval,Entities",
+"valueAxis": [
+"Entities"
+],
+"valueAxisLabel": "Entities",
+"tooltipVariant": "single"
+},
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"entities"
+],
+"leftAxisDimensions": [
+"Entities"
+]
+},
+"hiddenLegendFields": [],
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Entities",
+"autoscale": false,
+"alignment": "end",
+"sparklineSettings": {
+"isVisible": false,
+"record": "entities"
+},
+"recordField": "Entities",
+"trend": {
+"isRelative": false,
+"isVisible": true,
+"isInverseTrend": true,
+"trendType": "auto"
+}
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"entities"
+],
+"value": "sparkline",
+"id": 1734355518178
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Entities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": [
+[
+"Related services"
+]
+]
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"235": {
+"type": "data",
+"title": "Related applications",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level per timestamp\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  related_entities=arrayRemoveNulls(collectDistinct(related_entities.applications.ids, expand:true)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp,3h)}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| summarize {\n  related_entities=arraySize(collectDistinct(related_entities, expand:true))\n}, by: {timestamp}\n| makeTimeseries {\n  entities=sum(related_entities, default:0)\n}, time: timestamp, interval:3h\n| fieldsAdd Entities=arrayLast(entities)",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"Entities"
+],
+"categoryAxisLabel": "interval,Entities",
+"valueAxis": [
+"Entities"
+],
+"valueAxisLabel": "Entities",
+"tooltipVariant": "single"
+},
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"entities"
+],
+"leftAxisDimensions": [
+"Entities"
+]
+},
+"hiddenLegendFields": [],
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Entities",
+"autoscale": false,
+"alignment": "end",
+"sparklineSettings": {
+"isVisible": false,
+"record": "entities"
+},
+"recordField": "Entities",
+"trend": {
+"isRelative": false,
+"isVisible": true,
+"isInverseTrend": true,
+"trendType": "auto"
+}
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"entities"
+],
+"value": "sparkline",
+"id": 1734355516971
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Entities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": [
+[
+"Related services"
+]
+]
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"236": {
+"type": "data",
+"title": "Vulnerabilities (sorted by risk and total number of affected entities with assessments)",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// filter for the latest snapshot per entity\n| dedup {vulnerability.display_id, affected_entity.id}, sort:{timestamp desc}\n// now summarize on the vulnerability level\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.cvss.base_score=takeFirst(vulnerability.cvss.base_score),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.resolution.change_date=takeMax(vulnerability.parent.resolution.change_date),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.title=takeFirst(vulnerability.title),\n  vulnerability.references.cve=takeFirst(vulnerability.references.cve),\n  vulnerability.risk.score=round(takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),decimals:1),\n  affectedEntities=countDistinctExact(affected_entity.id),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\"),\n  functionsInUse=countIf(vulnerability.davis_assessment.vulnerable_function_status==\"IN_USE\"),\n  functionsNotAvailable=countIf(vulnerability.davis_assessment.vulnerable_function_status==\"NOT_AVAILABLE\"),\n  exposurePublicNetwork=countIf(vulnerability.davis_assessment.exposure_status==\"PUBLIC_NETWORK\"),\n  exposureNotAvailable=countIf(vulnerability.davis_assessment.exposure_status==\"NOT_AVAILABLE\"),\n  exploitAvailable=countIf(vulnerability.davis_assessment.exploit_status==\"AVAILABLE\"),\n  reachableDataAssets=countIf(vulnerability.davis_assessment.data_assets_status==\"REACHABLE\")\n},\nby: {vulnerability.display_id}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n// | filter vulnerability.parent.resolution.change_date >= toTimestamp($dt_timeframe_from)\n//           AND vulnerability.parent.resolution.change_date <= toTimestamp($dt_timeframe_to)\n| fieldsAdd vulnerability.title=concat(vulnerability.display_id,\" \",vulnerability.title)\n| fields\n  Status=concat(vulnerability.resolution.status,\" (\",vulnerability.mute.status,\")\"),\n  `Changed (days ago)`=toLong((toTimestamp($dt_timeframe_to)-vulnerability.parent.resolution.change_date)/1d),\n  Title=if(arraySize(vulnerability.references.cve)>0 AND NOT in(vulnerability.title,vulnerability.references.cve) ,\n           concat(vulnerability.title,vulnerability.references.cve),else:vulnerability.title),\n  vulnerability.risk.score,\n  DSS=concat(vulnerability.risk.level,\" (\",vulnerability.risk.score,\")\"),\n  CVSS=coalesce(vulnerability.cvss.base_score,\"-\"),\n  `Public exploit`=if(exploitAvailable>0,concat(\"❗\",\"Available\"),else:\"-\"),\n  `Public internet exposure`=exposurePublicNetwork,\n  `Vulnerable functions`=functionsInUse,\n  `Reachable data assets`=reachableDataAssets,\n   sorting=exposurePublicNetwork+functionsInUse+reachableDataAssets,\n   vulnerability.display_id\n| sort   {vulnerability.risk.score, direction:\"descending\"}, {sorting, direction:\"descending\"}\n| fieldsRemove sorting,vulnerability.risk.score",
+"davis": {
+"enabled": false,
+"davisVisualization": {
+"isAvailable": true
+}
+},
+"visualization": "table",
+"visualizationSettings": {
+"thresholds": [
+{
+"id": 1,
+"field": "Public internet exposure",
+"title": "",
+"isEnabled": true,
+"rules": [
+{
+"id": 0,
+"color": "#CD3741",
+"comparator": ">",
+"label": "",
+"value": 0
+}
+]
+},
+{
+"id": 2,
+"field": "Vulnerable functions",
+"title": "",
+"isEnabled": true,
+"rules": [
+{
+"id": 2,
+"color": {
+"Default": "var(--dt-colors-charts-categorical-color-12-default, #cd3741)"
+},
+"comparator": ">",
+"label": "",
+"value": 0
+}
+]
+},
+{
+"id": 3,
+"field": "Public exploit",
+"title": "",
+"isEnabled": true,
+"rules": [
+{
+"id": 2,
+"color": {
+"Default": "var(--dt-colors-charts-categorical-color-12-default, #cd3741)"
+},
+"comparator": ">",
+"label": "",
+"value": 0
+}
+]
+},
+{
+"id": 4,
+"field": "Reachable data assets",
+"title": "",
+"isEnabled": true,
+"rules": [
+{
+"id": 2,
+"color": {
+"Default": "var(--dt-colors-charts-categorical-color-12-default, #cd3741)"
+},
+"comparator": ">",
+"label": "",
+"value": 0
+}
+]
+}
+],
+"chartSettings": {
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxis": "Status",
+"categoryAxisLabel": "Status",
+"valueAxis": "Changed (days ago)",
+"valueAxisLabel": "Changed (days ago)"
+}
+},
+"singleValue": {
+"showLabel": true,
+"label": "Title",
+"autoscale": true,
+"recordField": "Title",
+"trend": {
+"trendType": "auto",
+"isVisible": true
+}
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [
+[
+"vulnerability.display_id"
+]
+],
+"lineWrapIds": [],
+"columnWidths": {
+"[\"Title\"]": 420,
+"[\"CVE\"]": 135,
+"[\"DSS\"]": 195,
+"[\"CVSS\"]": 95,
+"[\"Public internet exposure\"]": 217,
+"[\"Vulnerable functions\"]": 194,
+"[\"Public exploit\"]": 147,
+"[\"Reachable data assets\"]": 204,
+"[\"vulnerability.display_id\"]": 600
+},
+"sortBy": {
+"columnId": "[\"Changed (days ago)\"]",
+"direction": "ascending"
+},
+"columnTypeOverrides": []
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "Changed (days ago)"
+},
+"displayedFields": [
+"Status",
+"Title",
+"DSS",
+"CVSS",
+"Public exploit",
+"vulnerability.display_id"
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "Changed (days ago)",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Public internet exposure",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Vulnerable functions",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Reachable data assets",
+"rangeAxis": ""
+},
+{
+"valueAxis": "CVSS",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": [
+"Status",
+"Title",
+"DSS",
+"CVSS",
+"Public exploit",
+"vulnerability.display_id"
+]
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": [
+[
+"External id"
+]
+],
+"firstVisibleRowIndex": 0
+},
+"unitsOverrides": [
+{
+"identifier": "CVSS",
+"unitCategory": "unspecified",
+"baseUnit": "none",
+"displayUnit": null,
+"decimals": 1,
+"suffix": "",
+"delimiter": false,
+"added": 1704212515766
+}
+]
+},
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+}
+},
+"239": {
+"type": "data",
+"title": "Top 5 hosts by vulnerability count",
+"query": "fetch events, from:toTimestamp($dt_timeframe_to)-30m, to:toTimestamp($dt_timeframe_to)\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// filter for the latest snapshot per entity\n| dedup {vulnerability.display_id, affected_entity.id}, sort:{timestamp desc}\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  related_entities.hosts.ids=collectDistinct(if(affected_entity.type==\"HOST\",array(affected_entity.id),\n                                else:related_entities.hosts.ids), expand:true),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| expand host.id=related_entities.hosts.ids\n| join kind:inner, [\n      fetch dt.entity.host\n    | fieldsAdd host.name=entity.name, tags\n    | fields host.name, host.id=id, tags\n    | parse toString(tags), \"LD ('owner:'|'owner\\\\\\\\:') (SPACE)? LD:Team ('\\\"')\"   \n    | fieldsRemove tags\n    | fieldsAdd Team=coalesce(Team,\"-\")\n], on:{host.id}, fields:{Team, host.name}\n| summarize {\n  `Host name`=takeLast(host.name),\n  Critical=countIf(vulnerability.risk.level==\"CRITICAL\"),\n  High=countIf(vulnerability.risk.level==\"HIGH\"),\n  Vulnerabilities=count()\n}, by: {host.id, Team}\n| fields `Host name`, Critical, High, Vulnerabilities, Team, dt.source_entity=host.id\n| sort {Critical, direction:\"descending\"}, {High, direction:\"descending\"}, {Vulnerabilities, direction:\"descending\"}\n| limit 5",
+"visualizationSettings": {
+"thresholds": [
+{
+"id": 1,
+"field": "Critical",
+"title": "",
+"isEnabled": true,
+"rules": [
+{
+"id": 2,
+"color": {
+"Default": "var(--dt-colors-charts-security-risk-level-critical-default, #8a0012)"
+},
+"comparator": ">",
+"label": "",
+"value": 0
+}
+]
+},
+{
+"id": 2,
+"field": "High",
+"title": "",
+"isEnabled": true,
+"rules": [
+{
+"id": 2,
+"color": {
+"Default": "var(--dt-colors-charts-loglevel-error-default, #ec7113)"
+},
+"comparator": ">",
+"label": "",
+"value": 0
+}
+]
+}
+],
+"chartSettings": {
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxis": "Host name",
+"categoryAxisLabel": "Host name",
+"valueAxis": "Critical",
+"valueAxisLabel": "Critical",
+"layout": "horizontal",
+"colorPaletteMode": "multi-color"
+},
+"circleChartSettings": {
+"groupingThresholdType": "number-of-slices",
+"groupingThresholdValue": 10,
+"valueType": "absolute"
+},
+"legend": {
+"hidden": true
+}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Total vulnerabilities",
+"autoscale": true,
+"trend": {
+"isVisible": true,
+"isRelative": false,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": true,
+"variant": "area",
+"color": {
+"Default": "var(--dt-colors-charts-categorical-color-01-default, #134fc9)"
+},
+"showTicks": false
+},
+"recordField": "Total vulnerabilities",
+"alignment": "end"
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [
+[
+"dt.source_entity"
+]
+],
+"lineWrapIds": [],
+"columnWidths": {
+"[\"Name\"]": 264.0874938964844,
+"[\"Vulnerabilities\"]": 152.90000915527344,
+"[\"Team\"]": 222.6750030517578,
+"[\"dt.source_entity\"]": 273.51251220703125
+},
+"columnTypeOverrides": []
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "Critical"
+},
+"displayedFields": [
+"Host name"
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "Critical",
+"rangeAxis": ""
+},
+{
+"valueAxis": "High",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Vulnerabilities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": [
+"Host name",
+"Team",
+"dt.source_entity"
+]
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": []
+},
+"singleValueSettings": {
+"showLabel": true,
+"suffix": "",
+"autoscale": true
+}
+},
+"visualization": "table",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"240": {
+"type": "data",
+"title": "Public internet exposure",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  exposure_statuses=collectDistinct(vulnerability.davis_assessment.exposure_status),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp, 3h)}\n| fieldsAdd vulnerability.davis_assessment.exposure_status=if(in(\"PUBLIC_NETWORK\",exposure_statuses),\"PUBLIC_NETWORK\",\n                                                      else:if(in(\"ADJACENT_NETWORK\",exposure_statuses),\"ADJACENT_NETWORK\",\n                                                      else:if(in(\"NOT_DETECTED\",exposure_statuses),\"NOT_DETECTED\",\n                                                      else:\"NOT_AVAILABLE\")))\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| makeTimeseries {vulnerabilities=countIf(vulnerability.davis_assessment.exposure_status==\"PUBLIC_NETWORK\", default:0)}, \ntime: timestamp, interval:3h\n| fieldsAdd Vulnerabilities=arrayLast(vulnerabilities)",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"vulnerabilities"
+],
+"leftAxisDimensions": [
+"Vulnerabilities"
+]
+},
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"Vulnerabilities"
+],
+"categoryAxisLabel": "interval,Vulnerabilities",
+"valueAxis": [
+"Vulnerabilities"
+],
+"valueAxisLabel": "Vulnerabilities",
+"tooltipVariant": "single"
+},
+"hiddenLegendFields": [],
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Vulnerabilities",
+"autoscale": true,
+"prefixIcon": "PublicExposureIcon",
+"trend": {
+"isVisible": true,
+"isRelative": false,
+"isInverseTrend": true,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": false,
+"variant": "area",
+"color": {
+"Default": "var(--dt-colors-charts-categorical-color-05-default, #84859a)"
+},
+"record": "vulnerabilities"
+},
+"recordField": "Vulnerabilities",
+"alignment": "center",
+"colorThresholdTarget": "value"
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"vulnerabilities"
+],
+"value": "sparkline",
+"id": 1734355517020
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Vulnerabilities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": []
+},
+"singleValueSettings": {
+"showLabel": true,
+"suffix": "",
+"autoscale": true
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"241": {
+"type": "data",
+"title": "Reachable data assets",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  data_assets_statuses=collectDistinct(vulnerability.davis_assessment.data_assets_status),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp, 3h)}\n| fieldsAdd vulnerability.davis_assessment.data_assets_status=if(in(\"REACHABLE\",data_assets_statuses),\"REACHABLE\",\n                                                      else:if(in(\"NOT_DETECTED\",data_assets_statuses),\"NOT_DETECTED\",\n                                                      else:\"NOT_AVAILABLE\"))\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| makeTimeseries {vulnerabilities=countIf(vulnerability.davis_assessment.data_assets_status==\"REACHABLE\", default:0)}, \ntime: timestamp, interval:3h\n| fieldsAdd Vulnerabilities=arrayLast(vulnerabilities)",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"vulnerabilities"
+],
+"leftAxisDimensions": [
+"Vulnerabilities"
+]
+},
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"Vulnerabilities"
+],
+"categoryAxisLabel": "interval,Vulnerabilities",
+"valueAxis": [
+"Vulnerabilities"
+],
+"valueAxisLabel": "Vulnerabilities",
+"tooltipVariant": "single"
+},
+"hiddenLegendFields": [],
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Vulnerabilities",
+"autoscale": true,
+"prefixIcon": "AssetIcon",
+"trend": {
+"isVisible": true,
+"isRelative": false,
+"isInverseTrend": true,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": false,
+"variant": "area",
+"color": {
+"Default": "var(--dt-colors-charts-categorical-color-05-default, #84859a)"
+},
+"record": "vulnerabilities"
+},
+"recordField": "Vulnerabilities",
+"alignment": "center",
+"colorThresholdTarget": "value"
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"vulnerabilities"
+],
+"value": "sparkline",
+"id": 1734355516985
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Vulnerabilities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": []
+},
+"singleValueSettings": {
+"showLabel": true,
+"suffix": "",
+"autoscale": true
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"242": {
+"type": "data",
+"title": "Vulnerable functions in use",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  function_in_use_statuses=collectDistinct(vulnerability.davis_assessment.vulnerable_function_status),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp, 3h)}\n| fieldsAdd vulnerability.davis_assessment.vulnerable_function_status=if(in(\"IN_USE\",function_in_use_statuses),\"IN_USE\",\n                                                      else:if(in(\"NOT_IN_USE\",function_in_use_statuses),\"NOT_IN_USE\",\n                                                      else:\"NOT_AVAILABLE\"))\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| makeTimeseries {vulnerabilities=countIf(vulnerability.davis_assessment.vulnerable_function_status==\"IN_USE\", default:0)}, \ntime: timestamp, interval:3h\n| fieldsAdd Vulnerabilities=arrayLast(vulnerabilities)",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"vulnerabilities"
+],
+"leftAxisDimensions": [
+"Vulnerabilities"
+]
+},
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"Vulnerabilities"
+],
+"categoryAxisLabel": "interval,Vulnerabilities",
+"valueAxis": [
+"Vulnerabilities"
+],
+"valueAxisLabel": "Vulnerabilities",
+"tooltipVariant": "single"
+},
+"hiddenLegendFields": [],
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Vulnerabilities",
+"autoscale": true,
+"prefixIcon": "VulnerableFunctionIcon",
+"trend": {
+"isVisible": true,
+"isRelative": false,
+"isInverseTrend": true,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": false,
+"variant": "area",
+"color": {
+"Default": "var(--dt-colors-charts-categorical-color-05-default, #84859a)"
+},
+"record": "vulnerabilities"
+},
+"recordField": "Vulnerabilities",
+"alignment": "center",
+"colorThresholdTarget": "value"
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"vulnerabilities"
+],
+"value": "sparkline",
+"id": 1734355517035
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Vulnerabilities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": []
+},
+"singleValueSettings": {
+"showLabel": true,
+"suffix": "",
+"autoscale": true
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"243": {
+"type": "data",
+"title": "Public exploit published",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  vulnerability.davis_assessment.exploit_status=takeFirst(vulnerability.davis_assessment.exploit_status),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp, 3h)}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| makeTimeseries {vulnerabilities=countIf(vulnerability.davis_assessment.exploit_status==\"AVAILABLE\", default:0)}, \ntime: timestamp, interval:3h\n| fieldsAdd Vulnerabilities=arrayLast(vulnerabilities)",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"vulnerabilities"
+],
+"leftAxisDimensions": [
+"Vulnerabilities"
+]
+},
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"Vulnerabilities"
+],
+"categoryAxisLabel": "interval,Vulnerabilities",
+"valueAxis": [
+"Vulnerabilities"
+],
+"valueAxisLabel": "Vulnerabilities",
+"tooltipVariant": "single"
+},
+"hiddenLegendFields": [],
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Vulnerabilities",
+"autoscale": true,
+"prefixIcon": "ExploitIcon",
+"trend": {
+"isVisible": true,
+"isRelative": false,
+"isInverseTrend": true,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": false,
+"variant": "area",
+"color": {
+"Default": "var(--dt-colors-charts-categorical-color-05-default, #84859a)"
+},
+"record": "vulnerabilities"
+},
+"recordField": "Vulnerabilities",
+"alignment": "center",
+"colorThresholdTarget": "value"
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"vulnerabilities"
+],
+"value": "sparkline",
+"id": 1734355517005
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Vulnerabilities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": []
+},
+"singleValueSettings": {
+"showLabel": true,
+"suffix": "",
+"autoscale": true
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"244": {
+"type": "data",
+"title": "Top 5 vulnerability types",
+"query": "fetch events, from:toTimestamp($dt_timeframe_to)-30m, to:toTimestamp($dt_timeframe_to)\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// filter for the latest snapshot per entity\n| dedup {vulnerability.display_id, affected_entity.id}, sort:{timestamp desc}\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| summarize \n{vulnerability.type=takeFirst(vulnerability.type)},\nby: {vulnerability.display_id}\n| summarize \nvulnerabilities=count(), by:{vulnerability.type}\n| sort vulnerabilities,direction:\"descending\"\n|limit 5",
+"davis": {
+"enabled": false
+},
+"visualization": "categoricalBarChart",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"gapPolicy": "connect",
+"circleChartSettings": {
+"groupingThresholdType": "absolute",
+"groupingThresholdValue": 0,
+"valueType": "absolute",
+"showTotalValue": true
+},
+"categoryOverrides": {
+"NONE": {
+"color": "var(--dt-colors-charts-categorical-color-05-default, #84859a)",
+"added": 1701791339383
+}
+},
+"categoricalBarChartSettings": {
+"categoryAxis": "vulnerability.type",
+"categoryAxisLabel": "vulnerability.type",
+"valueAxis": "vulnerabilities",
+"valueAxisLabel": "vulnerabilities",
+"categoryAxisTickLayout": "horizontal",
+"layout": "horizontal"
+},
+"colorPalette": "categorical",
+"legend": {
+"position": "auto",
+"hidden": false
+},
+"truncationMode": "middle"
+},
+"singleValue": {
+"showLabel": true,
+"label": "vulnerability.type",
+"prefixIcon": "",
+"autoscale": true,
+"alignment": "center",
+"recordField": "vulnerability.type",
+"trend": {
+"trendType": "auto",
+"isVisible": true
+}
+},
+"table": {
+"rowDensity": "condensed",
+"enableSparklines": false,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnWidths": {},
+"columnTypeOverrides": []
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "vulnerabilities"
+},
+"displayedFields": [
+"vulnerability.type"
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "vulnerabilities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": [
+"vulnerability.type"
+]
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+}
+},
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+}
+},
+"246": {
+"type": "data",
+"title": "Affected entities",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level per timestamp\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  affected_entities=countDistinctExact(affected_entity.id),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp,3h)}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| makeTimeseries {\n  entities=sum(affected_entities, default:0)\n}, time: timestamp, interval:3h\n| fieldsAdd Entities=arrayLast(entities)",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"Entities"
+],
+"categoryAxisLabel": "interval,Entities",
+"valueAxis": [
+"Entities"
+],
+"valueAxisLabel": "Entities",
+"tooltipVariant": "single"
+},
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"entities"
+],
+"leftAxisDimensions": [
+"Entities"
+]
+},
+"hiddenLegendFields": [],
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Entities",
+"autoscale": false,
+"alignment": "end",
+"recordField": "Entities",
+"sparklineSettings": {
+"isVisible": false,
+"record": "entities"
+},
+"trend": {
+"isRelative": false,
+"isVisible": true,
+"isInverseTrend": true,
+"trendType": "auto"
+}
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"entities"
+],
+"value": "sparkline",
+"id": 1734355517048
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Entities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": [],
+"firstVisibleRowIndex": 0
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"247": {
+"type": "data",
+"title": "Related hosts",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level per timestamp\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  related_entities=arrayRemoveNulls(collectDistinct(related_entities.hosts.ids, expand:true)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp,3h)}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| summarize {\n  related_entities=arraySize(collectDistinct(related_entities, expand:true))\n}, by: {timestamp}\n| makeTimeseries {\n  entities=sum(related_entities, default:0)\n}, time: timestamp, interval:3h\n| fieldsAdd Entities=arrayLast(entities)",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"Entities"
+],
+"categoryAxisLabel": "interval,Entities",
+"valueAxis": [
+"Entities"
+],
+"valueAxisLabel": "Entities",
+"tooltipVariant": "single"
+},
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"entities"
+],
+"leftAxisDimensions": [
+"Entities"
+]
+},
+"hiddenLegendFields": [],
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Entities",
+"autoscale": false,
+"alignment": "end",
+"sparklineSettings": {
+"isVisible": false,
+"record": "entities"
+},
+"recordField": "Entities",
+"trend": {
+"isRelative": false,
+"isVisible": true,
+"isInverseTrend": true,
+"trendType": "auto"
+}
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"entities"
+],
+"value": "sparkline",
+"id": 1734355517062
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Entities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": [
+[
+"Related services"
+]
+]
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"248": {
+"type": "data",
+"title": "Related Kubernetes clusters",
+"query": "fetch events\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// now summarize on the vulnerability level per timestamp\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  related_entities=arrayRemoveNulls(collectDistinct(related_entities.kubernetes_clusters.ids, expand:true)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, timestamp=bin(timestamp,3h)}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| summarize {\n  related_entities=arraySize(collectDistinct(related_entities, expand:true))\n}, by: {timestamp}\n| makeTimeseries {\n  entities=sum(related_entities, default:0)\n}, time: timestamp, interval:3h\n| fieldsAdd Entities=arrayLast(entities)",
+"visualizationSettings": {
+"thresholds": [],
+"chartSettings": {
+"xAxisScaling": "analyzedTimeframe",
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxis": [
+"interval",
+"Entities"
+],
+"categoryAxisLabel": "interval,Entities",
+"valueAxis": [
+"Entities"
+],
+"valueAxisLabel": "Entities",
+"tooltipVariant": "single"
+},
+"fieldMapping": {
+"timestamp": "timeframe",
+"leftAxisValues": [
+"entities"
+],
+"leftAxisDimensions": [
+"Entities"
+]
+},
+"hiddenLegendFields": [],
+"circleChartSettings": {
+"groupingThresholdType": "relative",
+"groupingThresholdValue": 0,
+"valueType": "relative"
+},
+"truncationMode": "middle",
+"xAxisLabel": "timeframe",
+"xAxisIsLabelVisible": false,
+"valueRepresentation": "absolute",
+"leftYAxisSettings": {}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Entities",
+"autoscale": false,
+"alignment": "end",
+"recordField": "Entities",
+"trend": {
+"isRelative": false,
+"isVisible": true,
+"isInverseTrend": true,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": false,
+"record": "entities"
+}
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnTypeOverrides": [
+{
+"fields": [
+"entities"
+],
+"value": "sparkline",
+"id": 1734355517127
+}
+]
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "interval"
+},
+"displayedFields": [
+null
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "interval",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Entities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": []
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": [],
+"firstVisibleRowIndex": 0
+}
+},
+"visualization": "singleValue",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"249": {
+"type": "data",
+"title": "Top 5 products by vulnerability count",
+"query": "fetch events, from:toTimestamp($dt_timeframe_to)-30m, to:toTimestamp($dt_timeframe_to)\n| filter dt.system.bucket==\"default_security_events\"\n| filter event.provider==\"Dynatrace\"\n| filter event.type==\"VULNERABILITY_STATE_REPORT_EVENT\"\n| filter event.level==\"ENTITY\"\n// filter for the latest snapshot per entity\n| dedup {vulnerability.display_id, affected_entity.id}, sort:{timestamp desc}\n| lookup [\n    fetch dt.entity.process_group_instance, from:now() - 2h\n    | fields entity.name, releasesVersion, process_group = instance_of[dt.entity.process_group], releasesBuildVersion, releasesProduct, releasesStage\n    | filter isNotNull(releasesVersion)\n    | fieldsAdd releaseVersion = parse(releasesVersion,\"\"\" \"ReleaseVersionInfo{version='\"LD:version\"'\"LD \"\"\")\n    | summarize entity.name = takeAny(entity.name), by:{\n                   process_group,\n                   releaseVersion,\n                   releasesBuildVersion,\n                   releasesProduct,\n                   releasesStage\n                 }\n    | fields entity.name, entity.id=process_group, Version=releaseVersion, Build=releasesBuildVersion, Stage=releasesStage, Product=releasesProduct\n], sourceField:affected_entity.id, lookupField:entity.id, fields:{entity.name,entity.id,Version,Build,Stage,Product}\n| fieldsAdd Product=coalesce(Product,\"-\"), Stage=coalesce(Stage,\"-\")\n// now summarize on the vulnerability level\n| sort {timestamp, direction:\"descending\"}\n| summarize\n{\n  vulnerability.stack=takeAny(vulnerability.stack),\n  vulnerability.type=takeAny(vulnerability.type),\n  vulnerability.parent.resolution.status=takeFirst(vulnerability.parent.resolution.status),\n  vulnerability.parent.mute.status=takeFirst(vulnerability.parent.mute.status),\n  vulnerability.risk.score=takeMax(if(vulnerability.mute.status!=\"MUTED\",vulnerability.risk.score,else:0)),\n  affected_entity.management_zones.names=arrayRemoveNulls(collectArray(affected_entity.management_zones.names, expand:true)),\n  affected_entity.vulnerable_component.names=arrayRemoveNulls(collectArray(affected_entity.vulnerable_component.names)),\n  nonMutedEntities=countIf(vulnerability.mute.status==\"NOT_MUTED\"),\n  openStatus=countIf(vulnerability.resolution.status==\"OPEN\")\n},by: {vulnerability.display_id, Product, Stage}\n| fieldsAdd vulnerability.resolution.status=if(vulnerability.parent.resolution.status==\"RESOLVED\",\"RESOLVED\",\n                   else:if(openStatus==0, \"RESOLVED\",\n                   else:\"OPEN\"))\n| fieldsAdd vulnerability.mute.status=if(vulnerability.parent.mute.status==\"MUTED\",\"MUTED\",\n                   else:if(nonMutedEntities==0, \"MUTED\",\n                   else:\"NOT_MUTED\"))\n| fieldsAdd vulnerability.risk.level=if(vulnerability.risk.score>=9,\"CRITICAL\",\n                                     else:if(vulnerability.risk.score>=7,\"HIGH\",\n                                     else:if(vulnerability.risk.score>=4,\"MEDIUM\",\n                                     else:if(vulnerability.risk.score>=0.1,\"LOW\",\n                                     else:\"NONE\"))))\n// filter based on the variables\n| filter in(vulnerability.resolution.status,$ResolutionStatus) \n         AND in(vulnerability.mute.status,$MuteStatus)\n         AND in(vulnerability.risk.level,$RiskLevel)\n         AND (in(\"All\",$StackLevel) OR in(vulnerability.stack,{$StackLevel}))\n         AND (in(\"All\",$Type) OR in(vulnerability.type,$Type))\n         AND (in(\"All\",$ManagementZone) OR arraySize(affected_entity.management_zones.names)==0 \n                                     OR iAny(in(affected_entity.management_zones.names[], $ManagementZone)))\n         AND (in(\"All\",$ComponentName) OR in($ComponentName, affected_entity.vulnerable_component.names))\n// start metric calculation\n| summarize {\n    Critical=countIf(vulnerability.risk.level==\"CRITICAL\"),\n    High=countIf(vulnerability.risk.level==\"HIGH\"),\n    Vulnerabilities=count()\n}, by:{Product, Stage}\n| sort {Critical, direction:\"descending\"}, {High, direction:\"descending\"}, {Vulnerabilities, direction:\"descending\"}\n| limit 5",
+"visualizationSettings": {
+"thresholds": [
+{
+"id": 1,
+"field": "Critical",
+"title": "",
+"isEnabled": true,
+"rules": [
+{
+"id": 1,
+"color": {
+"Default": "var(--dt-colors-charts-security-risk-level-critical-default, #8a0012)"
+},
+"comparator": ">",
+"label": "",
+"value": 0
+}
+]
+},
+{
+"id": 2,
+"field": "High",
+"title": "",
+"isEnabled": true,
+"rules": [
+{
+"id": 2,
+"color": {
+"Default": "var(--dt-colors-charts-loglevel-error-default, #ec7113)"
+},
+"comparator": ">",
+"label": "",
+"value": 0
+}
+]
+}
+],
+"chartSettings": {
+"gapPolicy": "connect",
+"categoricalBarChartSettings": {
+"categoryAxisLabel": "Product",
+"valueAxisLabel": "Critical",
+"categoryAxis": "Product",
+"valueAxis": "Critical"
+},
+"circleChartSettings": {
+"valueType": "absolute",
+"showTotalValue": true,
+"groupingThresholdType": "absolute"
+}
+},
+"singleValue": {
+"showLabel": false,
+"label": "Critical",
+"autoscale": true,
+"prefixIcon": "SecurityCriticalIcon",
+"trend": {
+"isVisible": false,
+"isRelative": false,
+"trendType": "auto"
+},
+"sparklineSettings": {
+"isVisible": false,
+"variant": "area",
+"color": {
+"Default": "var(--dt-colors-charts-categorical-themed-fireplace-color-01-default, #ae132d)"
+},
+"record": "Vulnerabilities",
+"showTicks": false
+},
+"recordField": "Critical",
+"alignment": "end"
+},
+"table": {
+"enableLineWrap": true,
+"hiddenColumns": [],
+"lineWrapIds": [],
+"columnWidths": {
+"[\"affected_entity.id\"]": 273.51251220703125,
+"[\"Vulnerabilities\"]": 153,
+"[\"Name\"]": 243,
+"[\"entity.name\"]": 484,
+"[\"id\"]": 403.8000183105469,
+"[\"dt.source_entity\"]": 241,
+"[\"Product\"]": 178
+},
+"columnTypeOverrides": []
+},
+"honeycomb": {
+"shape": "square",
+"dataMappings": {
+"value": "Critical"
+},
+"displayedFields": [
+"Product"
+],
+"legend": {
+"hidden": false,
+"position": "auto"
+},
+"colorMode": "color-palette",
+"colorPalette": "blue"
+},
+"histogram": {
+"dataMappings": [
+{
+"valueAxis": "Critical",
+"rangeAxis": ""
+},
+{
+"valueAxis": "High",
+"rangeAxis": ""
+},
+{
+"valueAxis": "Vulnerabilities",
+"rangeAxis": ""
+}
+],
+"variant": "single",
+"displayedFields": [
+"Product",
+"Stage"
+]
+},
+"valueBoundaries": {
+"min": "auto",
+"max": "auto"
+},
+"tableSettings": {
+"displayMode": "edit",
+"lineWrapIds": []
+},
+"singleValueSettings": {
+"showLabel": true,
+"suffix": "",
+"autoscale": true
+},
+"unitsOverrides": [
+{
+"identifier": "Vulnerabilities",
+"unitCategory": "unspecified",
+"baseUnit": "none",
+"displayUnit": null,
+"decimals": 0,
+"suffix": "",
+"delimiter": false,
+"added": 1704276407024
+}
+]
+},
+"visualization": "table",
+"querySettings": {
+"maxResultRecords": 1000,
+"defaultScanLimitGbytes": 500,
+"maxResultMegaBytes": 100,
+"defaultSamplingRatio": 10,
+"enableSampling": false
+},
+"davis": {}
+},
+"250": {
+"type": "markdown",
+"content": "[i] Vulnerabilities with new affected entities detected."
+},
+"251": {
+"type": "markdown",
+"content": "Template version: 1.289"
+}
+},
+"layouts": {
+"195": {
+"x": 3,
+"y": 2,
+"w": 7,
+"h": 6
+},
+"196": {
+"x": 0,
+"y": 6,
+"w": 3,
+"h": 2
+},
+"209": {
+"x": 0,
+"y": 0,
+"w": 24,
+"h": 2
+},
+"215": {
+"x": 0,
+"y": 14,
+"w": 24,
+"h": 1
+},
+"224": {
+"x": 0,
+"y": 2,
+"w": 3,
+"h": 4
+},
+"225": {
+"x": 10,
+"y": 4,
+"w": 3,
+"h": 2
+},
+"226": {
+"x": 10,
+"y": 2,
+"w": 3,
+"h": 2
+},
+"227": {
+"x": 0,
+"y": 8,
+"w": 3,
+"h": 2
+},
+"228": {
+"x": 0,
+"y": 10,
+"w": 3,
+"h": 2
+},
+"233": {
+"x": 21,
+"y": 10,
+"w": 3,
+"h": 2
+},
+"234": {
+"x": 21,
+"y": 6,
+"w": 3,
+"h": 2
+},
+"235": {
+"x": 21,
+"y": 4,
+"w": 3,
+"h": 2
+},
+"236": {
+"x": 0,
+"y": 15,
+"w": 24,
+"h": 11
+},
+"239": {
+"x": 13,
+"y": 8,
+"w": 8,
+"h": 6
+},
+"240": {
+"x": 10,
+"y": 8,
+"w": 3,
+"h": 2
+},
+"241": {
+"x": 10,
+"y": 10,
+"w": 3,
+"h": 2
+},
+"242": {
+"x": 10,
+"y": 12,
+"w": 3,
+"h": 2
+},
+"243": {
+"x": 10,
+"y": 6,
+"w": 3,
+"h": 2
+},
+"244": {
+"x": 3,
+"y": 8,
+"w": 7,
+"h": 6
+},
+"246": {
+"x": 21,
+"y": 2,
+"w": 3,
+"h": 2
+},
+"247": {
+"x": 21,
+"y": 8,
+"w": 3,
+"h": 2
+},
+"248": {
+"x": 21,
+"y": 12,
+"w": 3,
+"h": 2
+},
+"249": {
+"x": 13,
+"y": 2,
+"w": 8,
+"h": 6
+},
+"250": {
+"x": 0,
+"y": 12,
+"w": 3,
+"h": 2
+},
+"251": {
+"x": 0,
+"y": 26,
+"w": 24,
+"h": 1
+}
+},
+"importedWithCode": false,
+"settings": {}
+}
